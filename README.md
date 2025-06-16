@@ -30,13 +30,26 @@ LineCoach operates through a system of specialized AI agents:
 ### Installation
 
 1. Clone the repository
-2. Install the required dependencies:
+2. Create and activate a virtual environment (recommended):
+
+```bash
+# Create a virtual environment
+python -m venv linecoach-env
+
+# Activate the virtual environment
+# On macOS/Linux:
+source linecoach-env/bin/activate
+# On Windows:
+linecoach-env\Scripts\activate
+```
+
+3. Install the required dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-3. Set up your environment variables:
+4. Set up your environment variables:
    - Copy the `.env-example` file to `.env`
    - Update the values in the `.env` file with your own credentials:
 
