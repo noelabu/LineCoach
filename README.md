@@ -26,6 +26,7 @@ LineCoach operates through a system of specialized AI agents:
 - Python 3.7+
 - Google Cloud account with Speech-to-Text and Vertex AI enabled
 - Google Cloud credentials file
+- Gemini API access (for gemini_live_coach.py)
 
 ### Installation
 
@@ -56,10 +57,12 @@ pip install -r requirements.txt
 ```
 GOOGLE_APPLICATION_CREDENTIALS='path-to-service-account-credentials'
 PROJECT_ID='gcp-project-id'
+GEMINI_API_KEY='your-gemini-api-key'
 ```
 
    - Replace `path-to-service-account-credentials` with the path to your Google Cloud credentials JSON file
    - Replace `gcp-project-id` with your Google Cloud project ID
+   - Replace `your-gemini-api-key` with your Gemini API key (if using API key authentication)
 
 ## Running the Application
 
@@ -78,9 +81,25 @@ This will:
 4. Transcribe your speech in real-time using Google Cloud Speech-to-Text
 5. Generate coaching recommendations using Vertex AI
 
+### Gemini Live Coach
+
+To run the Gemini-powered coaching application:
+
+```bash
+python gemini_live_coach.py
+```
+
+This will:
+1. Initialize the audio input device and Gemini API
+2. Start listening for speech with visual audio level indicators
+3. Process audio in chunks and send to Gemini for transcription
+4. Generate real-time coaching recommendations based on the conversation
+5. Display recommendations to assist the customer service representative
+
 ### Important Notes
 
 - Ensure your microphone is properly configured and not muted
 - Speak clearly for optimal speech recognition
 - The system requires an active internet connection for API access
-- Your Google Cloud service account needs the 'Vertex AI User' role
+- Your Google Cloud service account needs appropriate permissions
+- For Gemini API access, you need either a service account with proper permissions or an API key
