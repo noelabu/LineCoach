@@ -1,8 +1,11 @@
 import os
+import io
 import pyaudio
 import numpy as np
 import time
 import dotenv
+import base64
+import wave
 from pathlib import Path
 import google.generativeai as genai
 from google.auth import default
@@ -55,7 +58,7 @@ class AudioStreamer:
         self.CHANNELS = 1
         self.RATE = 16000
         self.CHUNK = int(self.RATE / 10)  # 100ms chunks
-        self.GAIN = 5.0  # Amplify the audio signal
+        self.GAIN = 2.0  # Reduced gain to make it less sensitive to background noise
         
         self.audio = pyaudio.PyAudio()
         self.stream = None
@@ -160,12 +163,12 @@ class AudioStreamer:
                     print(f"\r   Audio Level: [{bar}] {audio_level}    ", end='')
                     self.last_update = current_time
                 
-                # Detect speech based on audio level
-                if audio_level > 500 and not self.audio_detected:
+                # Detect speech based on audio level with higher threshold
+                if audio_level > 1500 and not self.audio_detected:  # Increased threshold from 500 to 1500
                     print(f"\n\n🔊 Audio detected! Level: {audio_level}")
                     self.audio_detected = True
                     self.silent_chunks = 0
-                elif audio_level <= 300 and self.audio_detected:
+                elif audio_level <= 800 and self.audio_detected:  # Increased threshold from 300 to 800
                     self.silent_chunks += 1
                     if self.silent_chunks > 30:  # About 3.0 seconds of silence
                         print(f"\n🔇 Silence detected after speech")
@@ -201,10 +204,8 @@ class GeminiTranscriber:
         print("📝 Started transcription service.")
         
     def _transcription_thread(self):
-        """Process audio and transcribe in a separate thread."""
-        # This would normally connect to Gemini Live API for streaming
-        # Since direct streaming audio to Gemini isn't available in the same way as Google Speech API,
-        # we'll simulate it by collecting audio chunks and sending batches
+        """Process audio and transcribe in a separate thread using Gemini."""
+        # Process audio in batches for transcription
         
         audio_buffer = b''
         silence_counter = 0
@@ -224,39 +225,112 @@ class GeminiTranscriber:
                 # If we have enough audio data or there's been silence, process it
                 if len(audio_buffer) > 32000 or silence_counter > 30:  # ~2 seconds of audio or 3 seconds of silence
                     if len(audio_buffer) > 0:
-                        # Here we would send audio to Gemini for transcription
-                        # For simulation, we'll use a placeholder
-                        # In a real implementation, you would use Gemini's audio transcription capabilities
+                        # Convert audio buffer to numpy array for processing
+                        audio_array = np.frombuffer(audio_buffer, dtype=np.int16)
                         
-                        # Simulate transcription delay
-                        time.sleep(0.5)
+                        # Check if audio has enough signal to process with higher threshold
+                        if np.max(np.abs(audio_array)) > 1500:  # Increased threshold from 500 to 1500
+                            try:
+                                # Create a prompt for Gemini that includes the audio transcription request
+                                prompt = "Please transcribe the following audio. Return only the transcribed text without any additional commentary."
+                                
+                                # Convert audio to base64 for API transmission
+                                import base64
+                                audio_b64 = base64.b64encode(audio_buffer).decode('utf-8')
+                                
+                                # Create a multipart request with text and audio
+                                # Gemini expects specific audio formats - let's use MP3
+                                # First, convert the raw PCM audio to proper WAV format
+                                import io
+                                import wave
+                                
+                                # Create in-memory WAV file
+                                wav_buffer = io.BytesIO()
+                                with wave.open(wav_buffer, 'wb') as wav_file:
+                                    wav_file.setnchannels(self.audio_streamer.CHANNELS)
+                                    wav_file.setsampwidth(2)  # 16-bit audio = 2 bytes
+                                    wav_file.setframerate(self.audio_streamer.RATE)
+                                    wav_file.writeframes(audio_buffer)
+                                
+                                # Get the WAV data
+                                wav_data = wav_buffer.getvalue()
+                                wav_b64 = base64.b64encode(wav_data).decode('utf-8')
+                                
+                                response = self.model.generate_content([
+                                    prompt,
+                                    {
+                                        "mime_type": "audio/wav",
+                                        "data": wav_b64
+                                    }
+                                ])
+                                
+                                # Get the transcription from the response
+                                transcript = response.text.strip()
+                                
+                                # Only process non-empty transcripts
+                                if transcript and len(transcript) > 0:
+                                    print(f"\n📝 TRANSCRIPT: {transcript}")
+                                    
+                                    # Add to conversation history
+                                    self.current_transcript = transcript
+                                    self.full_conversation.append(transcript)
+                                    
+                                    # First analyze the conversation
+                                    self._analyze_conversation(transcript)
+                                    
+                                    # Determine if coaching is needed based on specific triggers
+                                    should_coach = False
+                                    coaching_reason = ""
+                                    
+                                    # Get the last analysis results if available
+                                    sentiment = getattr(self, 'last_sentiment', 0)
+                                    empathy = getattr(self, 'last_empathy', 0)
+                                    resolution = getattr(self, 'last_resolution', 0)
+                                    escalation = getattr(self, 'last_escalation', 0)
+                                    
+                                    # Trigger 1: Low empathy score
+                                    if empathy < 5:
+                                        should_coach = True
+                                        coaching_reason = "Low empathy detected"
+                                    
+                                    # Trigger 2: Negative sentiment
+                                    if sentiment < -0.2:
+                                        should_coach = True
+                                        coaching_reason = "Negative sentiment detected"
+                                    
+                                    # Trigger 3: Rising escalation risk
+                                    if escalation > 30:
+                                        should_coach = True
+                                        coaching_reason = "Escalation risk increasing"
+                                    
+                                    # Trigger 4: Stalled resolution progress
+                                    if resolution < 40 and len(self.full_conversation) > 6:
+                                        should_coach = True
+                                        coaching_reason = "Resolution progress stalled"
+                                    
+                                    # Trigger 5: Regular check-in (every 3rd message)
+                                    if len(self.full_conversation) % 3 == 0:
+                                        should_coach = True
+                                        coaching_reason = "Regular coaching check-in"
+                                    
+                                    # Get recommendations if triggers activated
+                                    if should_coach:
+                                        print(f"\n🔔 COACHING TRIGGERED: {coaching_reason}")
+                                        self._get_recommendations(transcript)
+                            except Exception as e:
+                                print(f"\n❌ Error transcribing audio: {e}")
                         
-                        # For demo purposes, we'll just print a message
-                        # In a real implementation, you would get the transcript from Gemini
-                        print("\n📝 TRANSCRIPT: [Audio processed for transcription]")
-                        
-                        # Clear the buffer
+                        # Clear the buffer after processing
                         audio_buffer = b''
                         
-                        # In a real implementation, we would update the transcript here
-                        # For demo purposes, we'll just simulate getting recommendations
-                        self._get_recommendations()
-            
             except queue.Empty:
                 # No audio data available, continue
                 pass
             except Exception as e:
                 print(f"\n⚠️ Error in transcription: {e}")
     
-    def _get_recommendations(self):
+    def _get_recommendations(self, transcript):
         """Get recommendations based on the conversation."""
-        # For demo purposes, we'll use a simulated transcript
-        simulated_transcript = "Hi there, I'm having an issue with my account. I've been trying to access it for days but keep getting an error message."
-        
-        # Add to conversation history
-        self.full_conversation.append(simulated_transcript)
-        
-        print(f"\n📝 TRANSCRIPT: {simulated_transcript}")
         print("\n⏳ Generating recommendations...")
         
         try:
@@ -265,7 +339,9 @@ class GeminiTranscriber:
             You're an assistant helping a customer service representative during a call.
             Your job is to listen and suggest what they should say next.
 
-            Current transcript: "{simulated_transcript}"
+            Current transcript: "{transcript}"
+
+            Previous conversation context: "{' '.join(self.full_conversation[-3:])}"
 
             Role: Customer Service Representative
 
@@ -285,9 +361,60 @@ class GeminiTranscriber:
             
             print(f"💡 RECOMMENDATIONS:\n{recommendations}\n")
             
+            # Also analyze sentiment and escalation risk
+            self._analyze_conversation(transcript)
+            
         except Exception as e:
             print(f"❌ Error generating recommendation: {e}")
             print("This may be due to insufficient permissions or API issues.")
+            
+    def _analyze_conversation(self, transcript):
+        """Analyze the conversation for sentiment and escalation risk."""
+        try:
+            # Create prompt for analysis
+            prompt = f"""
+            Analyze the following customer service conversation transcript:
+            
+            "{transcript}"
+            
+            Previous conversation context: "{' '.join(self.full_conversation[-3:])}"
+            
+            Please provide the following metrics:
+            1. Sentiment score (-1 to 1, where -1 is very negative, 0 is neutral, and 1 is very positive)
+            2. Empathy score (0 to 10, where 10 is extremely empathetic)
+            3. Resolution progress (0% to 100%)
+            4. Escalation risk (0% to 100%)
+            
+            Format your response as:
+            Sentiment: [score]
+            Empathy: [score]/10
+            Resolution: [score]%
+            Escalation Risk: [score]%
+            """
+            
+            # Generate analysis using Gemini
+            response = self.model.generate_content(prompt)
+            analysis = response.text
+            
+            print(f"\n📊 Conversation Metrics:\n   {analysis}")
+            
+            # Parse the analysis to extract metrics
+            try:
+                lines = analysis.strip().split('\n')
+                for line in lines:
+                    if line.startswith('Sentiment:'):
+                        self.last_sentiment = float(line.split(':')[1].strip())
+                    elif line.startswith('Empathy:'):
+                        self.last_empathy = float(line.split(':')[1].split('/')[0].strip())
+                    elif line.startswith('Resolution:'):
+                        self.last_resolution = float(line.split(':')[1].strip('%'))
+                    elif line.startswith('Escalation Risk:'):
+                        self.last_escalation = float(line.split(':')[1].strip('%'))
+            except Exception as parse_error:
+                print(f"⚠️ Error parsing metrics: {parse_error}")
+            
+        except Exception as e:
+            print(f"❌ Error analyzing conversation: {e}")
     
     def stop_transcription(self):
         """Stop transcribing audio."""

@@ -1,8 +1,11 @@
 import os
+import io
 import pyaudio
 import numpy as np
 import time
 import dotenv
+import base64
+import wave
 from pathlib import Path
 import google.generativeai as genai
 from google.oauth2 import service_account
@@ -66,7 +69,7 @@ class AudioProcessor:
         self.CHANNELS = 1
         self.RATE = 16000
         self.CHUNK = int(self.RATE / 10)  # 100ms chunks
-        self.GAIN = 5.0  # Amplify the audio signal
+        self.GAIN = 2.0  # Reduced gain to make it less sensitive to background noise
         
         self.audio = pyaudio.PyAudio()
         self.stream = None
@@ -168,12 +171,12 @@ class AudioProcessor:
                     print(f"\r   Audio Level: [{bar}] {audio_level}    ", end='')
                     self.last_update = current_time
                 
-                # Detect speech based on audio level
-                if audio_level > 500 and not self.audio_detected:
+                # Detect speech based on audio level with higher threshold
+                if audio_level > 1500 and not self.audio_detected:  # Increased threshold from 500 to 1500
                     print(f"\n\n🔊 Audio detected! Level: {audio_level}")
                     self.audio_detected = True
                     self.silent_chunks = 0
-                elif audio_level <= 300 and self.audio_detected:
+                elif audio_level <= 800 and self.audio_detected:  # Increased threshold from 300 to 800
                     self.silent_chunks += 1
                     if self.silent_chunks > 30:  # About 3.0 seconds of silence
                         print(f"\n🔇 Silence detected after speech")
@@ -394,18 +397,10 @@ class LineCoachApp:
         self.analyzer = ConversationAnalyzer()
         self.is_running = False
         
-        # For simulating transcription (in a real app, this would use actual transcription)
-        self.demo_conversation = [
-            {"speaker": "customer", "text": "Hi, I've been having trouble logging into my account for the past three days. It keeps saying my password is incorrect, but I know it's right."},
-            {"speaker": "agent", "text": "I understand you've been having login issues. Can you tell me what error message you're seeing exactly?"},
-            {"speaker": "customer", "text": "It says 'Invalid credentials' and then locks me out after three attempts. I've tried resetting my password twice already."},
-            {"speaker": "agent", "text": "Let me check your account. What's your email address?"},
-            {"speaker": "customer", "text": "It's customer@example.com. I'm getting really frustrated with this because I need to access my account for work."},
-            {"speaker": "agent", "text": "I see your account here. It looks like there might be an issue with your account being flagged by our security system."},
-            {"speaker": "customer", "text": "Why would it be flagged? I haven't done anything unusual. This is really inconvenient."},
-            {"speaker": "agent", "text": "Sometimes this happens when there are multiple login attempts from different locations. I can help reset this for you right now."}
-        ]
-        self.demo_index = 0
+        # For audio transcription
+        self.audio_buffer = b''
+        self.silence_counter = 0
+        self.current_speaker = "customer"  # Default to customer speaking first
         self.last_transcript_time = time.time()
     
     def start(self):
@@ -437,55 +432,128 @@ class LineCoachApp:
         
         while self.is_running:
             try:
-                # In a real implementation, we would process audio and get actual transcripts
-                # For this demo, we'll simulate transcription with timed releases of our demo conversation
+                # Process audio from the queue
+                if not self.audio_processor.audio_queue.empty():
+                    audio_data = self.audio_processor.audio_queue.get(timeout=0.1)
+                    self.audio_buffer += audio_data
+                    
+                    # Reset silence counter when we get audio
+                    self.silence_counter = 0
+                else:
+                    self.silence_counter += 1
+                
+                # If we have enough audio data or there's been silence, process it
                 current_time = time.time()
-                
-                # Simulate new transcript every 5-10 seconds
-                if current_time - self.last_transcript_time > 5 and self.demo_index < len(self.demo_conversation):
-                    entry = self.demo_conversation[self.demo_index]
-                    transcript = entry["text"]
-                    speaker = entry["speaker"]
+                if (len(self.audio_buffer) > 32000 or self.silence_counter > 30) and \
+                   (current_time - self.last_transcript_time > 2):  # Minimum 2 seconds between transcriptions
                     
-                    # Add to conversation history
-                    self.analyzer.add_transcript(transcript, speaker)
-                    
-                    # Print the transcript
-                    print(f"\n📝 [{datetime.now().strftime('%H:%M:%S')}] {self.analyzer.speaker_roles[speaker]}: {transcript}")
-                    
-                    # Update last transcript time with some randomness
-                    self.last_transcript_time = current_time + (2 * np.random.random())
-                    self.demo_index += 1
-                    
-                    # After each agent response or every 2 customer messages, provide coaching
-                    if speaker == "agent" or self.demo_index % 2 == 0:
-                        # Get updated metrics
-                        metrics = self.analyzer.analyze_conversation()
+                    if len(self.audio_buffer) > 0:
+                        # Convert audio buffer to numpy array for processing
+                        audio_array = np.frombuffer(self.audio_buffer, dtype=np.int16)
                         
-                        # Print metrics
-                        print("\n📊 Conversation Metrics:")
-                        print(f"   Sentiment: {metrics['sentiment_score']:.2f} | Empathy: {metrics['empathy_score']:.1f}/10 | Resolution: {metrics['resolution_progress']}% | Escalation Risk: {metrics['escalation_risk']}%")
+                        # Check if audio has enough signal to process with higher threshold
+                        if np.max(np.abs(audio_array)) > 1500:  # Increased threshold from 500 to 1500
+                            try:
+                                # Create a prompt for Gemini that includes the audio transcription request
+                                prompt = "Please transcribe the following audio. Return only the transcribed text without any additional commentary."
+                                
+                                # Create a properly formatted WAV file
+                                import io
+                                import wave
+                                
+                                # Create in-memory WAV file
+                                wav_buffer = io.BytesIO()
+                                with wave.open(wav_buffer, 'wb') as wav_file:
+                                    wav_file.setnchannels(self.audio_processor.CHANNELS)
+                                    wav_file.setsampwidth(2)  # 16-bit audio = 2 bytes
+                                    wav_file.setframerate(self.audio_processor.RATE)
+                                    wav_file.writeframes(self.audio_buffer)
+                                
+                                # Get the WAV data and convert to base64
+                                wav_data = wav_buffer.getvalue()
+                                wav_b64 = base64.b64encode(wav_data).decode('utf-8')
+                                
+                                # Create a multipart request with text and audio
+                                model_name = os.environ.get('GEMINI_MODEL', 'gemini-1.5-flash')
+                                model = genai.GenerativeModel(model_name)
+                                response = model.generate_content([
+                                    prompt,
+                                    {
+                                        "mime_type": "audio/wav",
+                                        "data": wav_b64
+                                    }
+                                ])
+                                
+                                # Get the transcription from the response
+                                transcript = response.text.strip()
+                                
+                                # Only process non-empty transcripts
+                                if transcript and len(transcript) > 0:
+                                    # Toggle speaker for each transcription
+                                    self.current_speaker = "customer" if self.current_speaker == "agent" else "agent"
+                                    
+                                    # Add to conversation history
+                                    self.analyzer.add_transcript(transcript, self.current_speaker)
+                                    
+                                    # Print the transcript
+                                    print(f"\n📝 [{datetime.now().strftime('%H:%M:%S')}] {self.analyzer.speaker_roles[self.current_speaker]}: {transcript}")
+                                    
+                                    # Update last transcript time
+                                    self.last_transcript_time = current_time
+                                    
+                                    # Get updated metrics
+                                    metrics = self.analyzer.analyze_conversation()
+                                    
+                                    # Print metrics
+                                    print("\n📊 Conversation Metrics:")
+                                    print(f"   Sentiment: {metrics['sentiment_score']:.2f} | Empathy: {metrics['empathy_score']:.1f}/10 | Resolution: {metrics['resolution_progress']}% | Escalation Risk: {metrics['escalation_risk']}%")
+                                    
+                                    # Determine when to provide coaching recommendations based on specific triggers
+                                    should_coach = False
+                                    coaching_reason = ""
+                                    
+                                    # Trigger 1: Low empathy score
+                                    if metrics['empathy_score'] < 5:
+                                        should_coach = True
+                                        coaching_reason = "Low empathy detected"
+                                    
+                                    # Trigger 2: Negative sentiment
+                                    if metrics['sentiment_score'] < -0.2:
+                                        should_coach = True
+                                        coaching_reason = "Negative sentiment detected"
+                                    
+                                    # Trigger 3: Rising escalation risk
+                                    if metrics['escalation_risk'] > 30:
+                                        should_coach = True
+                                        coaching_reason = "Escalation risk increasing"
+                                    
+                                    # Trigger 4: Stalled resolution progress
+                                    if metrics['resolution_progress'] < 40 and len(self.analyzer.conversation_history) > 6:
+                                        should_coach = True
+                                        coaching_reason = "Resolution progress stalled"
+                                    
+                                    # Trigger 5: Every 3rd customer message (regular check-in)
+                                    if self.current_speaker == "customer" and len(self.analyzer.conversation_history) % 6 == 0:
+                                        should_coach = True
+                                        coaching_reason = "Regular coaching check-in"
+                                    
+                                    # Get coaching recommendations if triggers activated
+                                    if should_coach:
+                                        print(f"\n🔔 COACHING TRIGGERED: {coaching_reason}")
+                                        recommendations = self.analyzer.get_coaching_recommendations()
+                                        print(f"\n💡 COACHING RECOMMENDATIONS:\n{recommendations}\n")
+                                    
+                                    # Check for escalation
+                                    escalation = self.analyzer.get_escalation_alert()
+                                    if escalation.get("escalate", False):
+                                        print(f"\n⚠️ ESCALATION ALERT - {escalation.get('urgency', 'MEDIUM')} URGENCY")
+                                        print(f"   Reason: {escalation.get('reason', 'High risk of customer dissatisfaction')}")
+                                        print("   Recommended action: Transfer to supervisor\n")
+                            except Exception as e:
+                                print(f"\n❌ Error transcribing audio: {e}")
                         
-                        # Get coaching recommendations
-                        recommendations = self.analyzer.get_coaching_recommendations()
-                        print(f"\n💡 COACHING RECOMMENDATIONS:\n{recommendations}\n")
-                        
-                        # Check for escalation
-                        escalation = self.analyzer.get_escalation_alert()
-                        if escalation["escalate"]:
-                            print(f"\n⚠️ ESCALATION ALERT - {escalation['urgency']} URGENCY")
-                            print(f"   Reason: {escalation['reason']}")
-                            print("   Recommended action: Transfer to supervisor\n")
-                
-                # If we've gone through all demo conversation entries, end the session
-                if self.demo_index >= len(self.demo_conversation) and current_time - self.last_transcript_time > 10:
-                    print("\n✅ Demo conversation complete.")
-                    
-                    # Save session data
-                    self.analyzer.save_session()
-                    
-                    # End the session
-                    self.is_running = False
+                        # Clear the buffer after processing
+                        self.audio_buffer = b''
                 
                 time.sleep(0.1)
                 
