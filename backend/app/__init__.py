@@ -1,0 +1,3 @@
+"""
+LineCoach FastAPI Application
+""" 

@@ -192,3 +192,8 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# Google Cloud service account keys
+hacker2025-team-156-dev-25828bc09caa.json
+hacker2025-team-156-dev-e13a60895e27.json
+hacker2025-team-175-dev-cec04ece595a.json
