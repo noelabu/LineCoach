@@ -120,6 +120,38 @@ This will:
 4. Generate real-time coaching recommendations based on the conversation
 5. Display recommendations to assist the customer service representative
 
+### API Server
+
+To run the LineCoach API server:
+
+```bash
+uv run uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+This will start the FastAPI server on http://localhost:8000. 
+
+You can access the API documentation at http://localhost:8000/docs.
+
+#### API Endpoints
+
+The following endpoints are available:
+
+- **POST /api/v1/linecoach/transcribe**: Transcribe audio data
+  - Request: Audio data in base64 format
+  - Response: Transcribed text
+
+- **POST /api/v1/linecoach/analyze**: Analyze conversation for sentiment and metrics
+  - Request: Transcript and conversation history
+  - Response: Sentiment, empathy, resolution, and escalation metrics
+
+- **POST /api/v1/linecoach/coach**: Get coaching recommendations
+  - Request: Transcript and conversation history
+  - Response: Coaching recommendations
+
+- **POST /api/v1/linecoach/full_coaching**: Get both recommendations and analysis
+  - Request: Transcript and conversation history
+  - Response: Recommendations and analysis metrics
+
 ### Important Notes
 
 - Ensure your microphone is properly configured and not muted

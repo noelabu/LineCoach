@@ -94,4 +94,190 @@ The advanced script saves session data to a `sessions` directory in JSON format,
 - Metrics over time
 - Coaching recommendations
 
-You can review these files to track performance and identify training opportunities. 
+You can review these files to track performance and identify training opportunities.
+
+# LineCoach API Usage Guide
+
+This guide provides examples of how to use the LineCoach API endpoints.
+
+## API Endpoints
+
+The LineCoach API provides the following endpoints:
+
+### 1. Transcribe Audio
+
+**Endpoint:** `POST /api/v1/linecoach/transcribe`
+
+Transcribes audio data and returns the transcribed text.
+
+**Request:**
+
+```json
+{
+  "audio_data": "base64_encoded_audio_data",
+  "sample_rate": 16000,
+  "channels": 1,
+  "content_type": "audio/wav"
+}
+```
+
+**Response:**
+
+```json
+{
+  "transcript": "Hello, I'm having an issue with my account."
+}
+```
+
+### 2. Analyze Conversation
+
+**Endpoint:** `POST /api/v1/linecoach/analyze`
+
+Analyzes a conversation transcript for sentiment, empathy, resolution progress, and escalation risk.
+
+**Request:**
+
+```json
+{
+  "transcript": "I understand you're frustrated with the service. Let me help resolve this issue for you.",
+  "conversation_history": [
+    "Hello, I'm having an issue with my account.",
+    "I've been trying to log in for hours and it's not working."
+  ]
+}
+```
+
+**Response:**
+
+```json
+{
+  "sentiment": 0.2,
+  "empathy": 8.5,
+  "resolution": 45.0,
+  "escalation": 15.0
+}
+```
+
+### 3. Get Coaching Recommendations
+
+**Endpoint:** `POST /api/v1/linecoach/coach`
+
+Provides coaching recommendations based on the conversation.
+
+**Request:**
+
+```json
+{
+  "transcript": "I understand you're frustrated with the service. Let me help resolve this issue for you.",
+  "conversation_history": [
+    "Hello, I'm having an issue with my account.",
+    "I've been trying to log in for hours and it's not working."
+  ]
+}
+```
+
+**Response:**
+
+```json
+{
+  "recommendations": "1. Ask for specific details about the login attempts.\n2. Offer to reset their password.\n3. Reassure them that you'll stay with them until the issue is resolved."
+}
+```
+
+### 4. Full Coaching Analysis
+
+**Endpoint:** `POST /api/v1/linecoach/full_coaching`
+
+Provides both coaching recommendations and conversation analysis.
+
+**Request:**
+
+```json
+{
+  "transcript": "I understand you're frustrated with the service. Let me help resolve this issue for you.",
+  "conversation_history": [
+    "Hello, I'm having an issue with my account.",
+    "I've been trying to log in for hours and it's not working."
+  ]
+}
+```
+
+**Response:**
+
+```json
+{
+  "recommendations": "1. Ask for specific details about the login attempts.\n2. Offer to reset their password.\n3. Reassure them that you'll stay with them until the issue is resolved.",
+  "analysis": {
+    "sentiment": 0.2,
+    "empathy": 8.5,
+    "resolution": 45.0,
+    "escalation": 15.0
+  }
+}
+```
+
+## Example Usage with Python
+
+Here's an example of how to use the API with Python:
+
+```python
+import requests
+import base64
+import json
+
+# API base URL
+BASE_URL = "http://localhost:8000/api/v1/linecoach"
+
+# Example 1: Transcribe audio
+def transcribe_audio(audio_file_path):
+    # Read audio file and encode as base64
+    with open(audio_file_path, "rb") as audio_file:
+        audio_data = base64.b64encode(audio_file.read()).decode("utf-8")
+    
+    # Prepare request
+    payload = {
+        "audio_data": audio_data,
+        "sample_rate": 16000,
+        "channels": 1
+    }
+    
+    # Send request
+    response = requests.post(f"{BASE_URL}/transcribe", json=payload)
+    return response.json()
+
+# Example 2: Get coaching recommendations
+def get_coaching(transcript, conversation_history=None):
+    if conversation_history is None:
+        conversation_history = []
+    
+    # Prepare request
+    payload = {
+        "transcript": transcript,
+        "conversation_history": conversation_history
+    }
+    
+    # Send request
+    response = requests.post(f"{BASE_URL}/coach", json=payload)
+    return response.json()
+
+# Example usage
+if __name__ == "__main__":
+    # Transcribe an audio file
+    result = transcribe_audio("path/to/audio.wav")
+    print(f"Transcript: {result['transcript']}")
+    
+    # Get coaching recommendations
+    coaching = get_coaching(
+        "I understand you're frustrated with the service. Let me help resolve this issue for you.",
+        ["Hello, I'm having an issue with my account.", 
+         "I've been trying to log in for hours and it's not working."]
+    )
+    print(f"Recommendations: {coaching['recommendations']}")
+```
+
+## Notes
+
+- All endpoints return JSON responses
+- Error responses include a detail field with an error message
+- Audio data should be base64 encoded
+- The API supports WAV audio format 
