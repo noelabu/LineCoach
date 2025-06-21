@@ -1,0 +1,19 @@
+version: "3.8"
+
+services:
+  noneaway-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      - SECRET_KEY=${SECRET_KEY}
+      - ALGORITHM=${ALGORITHM}
+      - API_KEY=${API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - .:/app
+    restart: always

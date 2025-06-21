@@ -1,0 +1,36 @@
+# Ignore version control files
+.git/
+.gitignore
+
+# Ignore Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore virtual environments
+venv/
+.venv/
+
+# Ignore IDE/editor files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Ignore local development files
+.env
+.env.local
+.env.*.local
+
+# Ignore log files
+*.log
+
+# Ignore test files (if not needed in production)
+tests/
+pytest_cache/
+
+# Ignore distribution and build files
+dist/
+build/
+*.egg-info/

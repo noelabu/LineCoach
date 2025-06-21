@@ -23,42 +23,66 @@ LineCoach operates through a system of specialized AI agents:
 
 ### Prerequisites
 
-- Python 3.7+
 - Google Cloud account with Speech-to-Text and Vertex AI enabled
 - Google Cloud credentials file
 - Gemini API access (for gemini_live_coach.py)
 
+## Getting started with Development
+
+### Pre-requisites
+Before running the application, make sure you have the following installed:
+
+* Python v3.12^
+* uv v0.5.23^
+
+```bash
+# On macOS and Linux.
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# On Windows.
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
 ### Installation
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/noelabu/LineCoach.git
+   ```
+2. Navigate to the project directory:
+   ```bash
+   cd LineCoach
+   ```
+3. Install dependencies using uv:
+   ```bash
+   # Create the virtual environment within the project directory for code editors to use.
+   uv venv --python 3.12.0
 
-1. Clone the repository
-2. Create and activate a virtual environment (recommended):
+   # Activate the virtual environment
+   # On macOS/Linux
+   source .venv/bin/activate
+   # On Windows
+   .venv\Scripts\activate
 
-```bash
-# Create a virtual environment
-python -m venv linecoach-env
+   # Install all the dependencies for the package in a virtual environment
+   uv pip install -e .
 
-# Activate the virtual environment
-# On macOS/Linux:
-source linecoach-env/bin/activate
-# On Windows:
-linecoach-env\Scripts\activate
-```
+   # Install pre-commit hooks (if available)
+   uv run pre-commit install
+   ```
 
-3. Install the required dependencies:
+### Configuration
 
-```bash
-pip install -r requirements.txt
-```
+1. Copy the example `.env-example` file to `.env`:
+   ```bash
+   cp .env-example .env
+   ```
 
-4. Set up your environment variables:
-   - Copy the `.env-example` file to `.env`
-   - Update the values in the `.env` file with your own credentials:
-
-```
-GOOGLE_APPLICATION_CREDENTIALS='path-to-service-account-credentials'
-PROJECT_ID='gcp-project-id'
-GEMINI_API_KEY='your-gemini-api-key'
-```
+2. Update the values in the `.env` file with your own credentials:
+   ```
+   GOOGLE_APPLICATION_CREDENTIALS='path-to-service-account-credentials'
+   PROJECT_ID='gcp-project-id'
+   GEMINI_API_KEY='your-gemini-api-key'
+   ```
 
    - Replace `path-to-service-account-credentials` with the path to your Google Cloud credentials JSON file
    - Replace `gcp-project-id` with your Google Cloud project ID
@@ -71,7 +95,7 @@ GEMINI_API_KEY='your-gemini-api-key'
 To run the test streaming application:
 
 ```bash
-python test_streaming.py
+uv run python tests/test_streaming.py
 ```
 
 This will:
@@ -86,7 +110,7 @@ This will:
 To run the Gemini-powered coaching application:
 
 ```bash
-python gemini_live_coach.py
+uv run python tests/gemini_live_coach.py
 ```
 
 This will:

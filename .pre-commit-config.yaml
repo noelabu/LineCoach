@@ -1,0 +1,45 @@
+default_stages: [commit, push]
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+    # Identify invalid files
+      - id: check-ast
+      - id: check-yaml
+      - id: check-json
+      # git checks
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: detect-private-key
+      # Python checks
+      - id: check-docstring-first
+      - id: debug-statements
+      - id: fix-byte-order-marker
+      # General quality checks
+      - id: mixed-line-ending
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff
+        entry: uv run ruff check
+        language: system
+        types_or:
+          - python
+          - pyi
+        args:
+          - --force-exclude
+          - --fix
+        require_serial: true
+      - id: ruff-format
+        name: ruff-format
+        entry: uv run ruff format
+        language: system
+        types_or:
+          - python
+          - pyi
+        args:
+          - --force-exclude
+        require_serial: true
