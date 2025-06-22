@@ -42,6 +42,7 @@ except Exception as e:
     logger.error(f"Failed to initialize Gemini API: {e}")
 
 
+
 # Pydantic models for request and response
 class AudioRequest(BaseModel):
     audio_data: str  # Base64 encoded audio data
@@ -82,6 +83,7 @@ class WSAudioMessage(BaseModel):
     audio_data: str  # Base64 encoded audio chunk
     sample_rate: int = 16000
     channels: int = 1
+    speaker: str = "agent"  # "agent" or "customer"
 
 
 class WSResponseMessage(BaseModel):
@@ -123,7 +125,12 @@ class ConnectionManager:
     async def send_message(self, client_id: str, message: WSResponseMessage):
         if client_id in self.active_connections:
             websocket = self.active_connections[client_id]
-            await websocket.send_json(message.dict())
+            try:
+                await websocket.send_json(message.dict())
+            except Exception as e:
+                logger.warning(f"Failed to send message to client {client_id}: {e}")
+                # Remove the disconnected client
+                self.disconnect(client_id)
     
     def get_state(self, client_id: str) -> Dict[str, Any]:
         return self.connection_states.get(client_id, {})
@@ -179,16 +186,30 @@ def process_audio(audio_data_base64: str, sample_rate: int, channels: int) -> st
         raise HTTPException(status_code=500, detail=f"Error processing audio: {str(e)}")
 
 
-def analyze_conversation(transcript: str, conversation_history: List[str]) -> Dict[str, float]:
+def analyze_conversation(transcript: str, conversation_history: List[Any]) -> Dict[str, float]:
     """Analyze the conversation for sentiment and other metrics."""
     try:
+        # Format conversation history
+        if conversation_history:
+            # Handle both old format (strings) and new format (dicts with speaker info)
+            formatted_history = []
+            for item in conversation_history[-3:]:
+                if isinstance(item, dict):
+                    formatted_history.append(f"{item['speaker']}: {item['text']}")
+                else:
+                    # Fallback for old format
+                    formatted_history.append(str(item))
+            context = " | ".join(formatted_history)
+        else:
+            context = ""
+        
         # Create prompt for analysis
         prompt = f"""
         Analyze the following customer service conversation transcript:
         
         "{transcript}"
         
-        Previous conversation context: "{' '.join(conversation_history[-3:] if conversation_history else [])}"
+        Previous conversation context: "{context}"
         
         Please provide the following metrics:
         1. Sentiment score (-1 to 1, where -1 is very negative, 0 is neutral, and 1 is very positive)
@@ -236,9 +257,23 @@ def analyze_conversation(transcript: str, conversation_history: List[str]) -> Di
         raise HTTPException(status_code=500, detail=f"Error analyzing conversation: {str(e)}")
 
 
-def get_recommendations(transcript: str, conversation_history: List[str]) -> str:
+def get_recommendations(transcript: str, conversation_history: List[Any]) -> str:
     """Get recommendations based on the conversation."""
     try:
+        # Format conversation history
+        if conversation_history:
+            # Handle both old format (strings) and new format (dicts with speaker info)
+            formatted_history = []
+            for item in conversation_history[-3:]:
+                if isinstance(item, dict):
+                    formatted_history.append(f"{item['speaker']}: {item['text']}")
+                else:
+                    # Fallback for old format
+                    formatted_history.append(str(item))
+            context = " | ".join(formatted_history)
+        else:
+            context = ""
+        
         # Create prompt for Gemini
         prompt = f"""
         You're an assistant helping a customer service representative during a call.
@@ -246,7 +281,7 @@ def get_recommendations(transcript: str, conversation_history: List[str]) -> str
 
         Current transcript: "{transcript}"
 
-        Previous conversation context: "{' '.join(conversation_history[-3:] if conversation_history else [])}"
+        Previous conversation context: "{context}"
 
         Role: Customer Service Representative
 
@@ -341,7 +376,7 @@ async def full_coaching(request: CoachingRequest):
 
 
 # WebSocket helper functions
-async def process_audio_chunk(client_id: str, audio_data: str, sample_rate: int, channels: int):
+async def process_audio_chunk(client_id: str, audio_data: str, sample_rate: int, channels: int, speaker: str = "agent"):
     """Process audio chunk and return transcript if available."""
     try:
         state = manager.get_state(client_id)
@@ -399,10 +434,15 @@ async def process_audio_chunk(client_id: str, audio_data: str, sample_rate: int,
                     # Update conversation history
                     history = state.get("conversation_history", [])
                     if transcript and len(transcript.strip()) > 0:
-                        history.append(transcript)
+                        # Store with speaker information
+                        history.append({
+                            "speaker": speaker,
+                            "text": transcript,
+                            "timestamp": datetime.now().isoformat()
+                        })
                         manager.update_state(client_id, "conversation_history", history)
                         
-                        return transcript
+                        return {"transcript": transcript, "speaker": speaker}
                 else:
                     # Not enough audio, just reset
                     manager.update_state(client_id, "audio_buffer", b"")
@@ -427,10 +467,15 @@ async def process_audio_chunk(client_id: str, audio_data: str, sample_rate: int,
             # Update conversation history
             history = state.get("conversation_history", [])
             if transcript and len(transcript.strip()) > 0:
-                history.append(transcript)
+                # Store with speaker information
+                history.append({
+                    "speaker": speaker,
+                    "text": transcript,
+                    "timestamp": datetime.now().isoformat()
+                })
                 manager.update_state(client_id, "conversation_history", history)
                 
-                return transcript
+                return {"transcript": transcript, "speaker": speaker}
     
     except Exception as e:
         logger.error(f"Error processing audio chunk: {e}")
@@ -488,20 +533,24 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
             if message.type == "audio":
                 # Process audio data
                 audio_msg = WSAudioMessage(**message.data)
-                transcript = await process_audio_chunk(
+                result = await process_audio_chunk(
                     client_id,
                     audio_msg.audio_data,
                     audio_msg.sample_rate,
-                    audio_msg.channels
+                    audio_msg.channels,
+                    audio_msg.speaker
                 )
                 
-                if transcript:
-                    # Send transcript to client
+                if result:
+                    # Send transcript to client with speaker info
                     await manager.send_message(
                         client_id,
                         WSResponseMessage(
                             type="transcript",
-                            data={"transcript": transcript},
+                            data={
+                                "transcript": result["transcript"],
+                                "speaker": result["speaker"]
+                            },
                             timestamp=datetime.now().isoformat()
                         )
                     )
@@ -512,7 +561,7 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                     
                     # Analyze conversation
                     try:
-                        metrics = analyze_conversation(transcript, history)
+                        metrics = analyze_conversation(result["transcript"], history)
                         manager.update_state(client_id, "metrics", metrics)
                         
                         # Send analysis to client
@@ -530,7 +579,7 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                         
                         if should_coach:
                             # Get recommendations
-                            recommendations = get_recommendations(transcript, history)
+                            recommendations = get_recommendations(result["transcript"], history)
                             
                             # Send recommendations to client
                             await manager.send_message(
@@ -547,14 +596,18 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                     
                     except Exception as e:
                         logger.error(f"Error in analysis/coaching: {e}")
-                        await manager.send_message(
-                            client_id,
-                            WSResponseMessage(
-                                type="error",
-                                data={"error": f"Analysis error: {str(e)}"},
-                                timestamp=datetime.now().isoformat()
+                        try:
+                            await manager.send_message(
+                                client_id,
+                                WSResponseMessage(
+                                    type="error",
+                                    data={"error": f"Analysis error: {str(e)}"},
+                                    timestamp=datetime.now().isoformat()
+                                )
                             )
-                        )
+                        except Exception:
+                            # Client already disconnected, ignore
+                            pass
             
             elif message.type == "ping":
                 # Respond to ping with pong
@@ -588,12 +641,18 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
     
     except Exception as e:
         logger.error(f"WebSocket error for client {client_id}: {e}")
-        await manager.send_message(
-            client_id,
-            WSResponseMessage(
-                type="error",
-                data={"error": str(e)},
-                timestamp=datetime.now().isoformat()
+        try:
+            await manager.send_message(
+                client_id,
+                WSResponseMessage(
+                    type="error",
+                    data={"error": str(e)},
+                    timestamp=datetime.now().isoformat()
+                )
             )
-        )
-        manager.disconnect(client_id) 
+        except Exception:
+            # Client already disconnected, ignore
+            pass
+        manager.disconnect(client_id)
+
+ 
