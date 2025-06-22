@@ -7,12 +7,15 @@ from pathlib import Path
 import google.generativeai as genai
 from google.auth import default
 from google.oauth2 import service_account
-from fastapi import APIRouter, HTTPException, Depends, Request, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends, Request, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import logging
 from app.core.config import settings
+import json
+import asyncio
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(level=getattr(logging, settings.LOG_LEVEL))
@@ -66,6 +69,71 @@ class AnalysisResponse(BaseModel):
 class RecommendationResponse(BaseModel):
     recommendations: str
     analysis: Optional[AnalysisResponse] = None
+
+
+# WebSocket message models
+class WSMessage(BaseModel):
+    type: str  # "audio", "config", "ping", "pong"
+    data: Optional[Dict[str, Any]] = None
+    timestamp: Optional[str] = None
+
+
+class WSAudioMessage(BaseModel):
+    audio_data: str  # Base64 encoded audio chunk
+    sample_rate: int = 16000
+    channels: int = 1
+
+
+class WSResponseMessage(BaseModel):
+    type: str  # "transcript", "analysis", "recommendation", "error"
+    data: Dict[str, Any]
+    timestamp: str
+
+
+# WebSocket Connection Manager
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Dict[str, WebSocket] = {}
+        self.connection_states: Dict[str, Dict[str, Any]] = {}
+    
+    async def connect(self, websocket: WebSocket, client_id: str):
+        await websocket.accept()
+        self.active_connections[client_id] = websocket
+        self.connection_states[client_id] = {
+            "conversation_history": [],
+            "audio_buffer": b"",
+            "last_activity": datetime.now(),
+            "audio_detected": False,
+            "silence_chunks": 0,
+            "metrics": {
+                "sentiment": 0,
+                "empathy": 5,
+                "resolution": 0,
+                "escalation": 0
+            }
+        }
+        logger.info(f"Client {client_id} connected")
+    
+    def disconnect(self, client_id: str):
+        if client_id in self.active_connections:
+            del self.active_connections[client_id]
+            del self.connection_states[client_id]
+            logger.info(f"Client {client_id} disconnected")
+    
+    async def send_message(self, client_id: str, message: WSResponseMessage):
+        if client_id in self.active_connections:
+            websocket = self.active_connections[client_id]
+            await websocket.send_json(message.dict())
+    
+    def get_state(self, client_id: str) -> Dict[str, Any]:
+        return self.connection_states.get(client_id, {})
+    
+    def update_state(self, client_id: str, key: str, value: Any):
+        if client_id in self.connection_states:
+            self.connection_states[client_id][key] = value
+
+
+manager = ConnectionManager()
 
 
 # Helper functions
@@ -269,4 +337,263 @@ async def full_coaching(request: CoachingRequest):
         }
     except Exception as e:
         logger.error(f"Error in full_coaching endpoint: {e}")
-        raise HTTPException(status_code=500, detail=str(e)) 
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# WebSocket helper functions
+async def process_audio_chunk(client_id: str, audio_data: str, sample_rate: int, channels: int):
+    """Process audio chunk and return transcript if available."""
+    try:
+        state = manager.get_state(client_id)
+        
+        # Decode audio chunk
+        audio_bytes = base64.b64decode(audio_data)
+        
+        # Convert to numpy array to check audio level
+        audio_array = np.frombuffer(audio_bytes, dtype=np.int16)
+        audio_level = np.max(np.abs(audio_array)) if len(audio_array) > 0 else 0
+        
+        # Get or initialize silence tracking
+        silence_threshold = 800  # Audio level threshold for silence
+        silence_chunks = state.get("silence_chunks", 0)
+        audio_detected = state.get("audio_detected", False)
+        
+        # Append to buffer
+        current_buffer = state.get("audio_buffer", b"")
+        updated_buffer = current_buffer + audio_bytes
+        
+        # Update buffer in state
+        manager.update_state(client_id, "audio_buffer", updated_buffer)
+        
+        # Detect speech or silence
+        if audio_level > 1500 and not audio_detected:
+            # Speech detected
+            manager.update_state(client_id, "audio_detected", True)
+            manager.update_state(client_id, "silence_chunks", 0)
+            logger.debug(f"Audio detected for client {client_id}, level: {audio_level}")
+        elif audio_level <= silence_threshold and audio_detected:
+            # Count silence chunks
+            silence_chunks += 1
+            manager.update_state(client_id, "silence_chunks", silence_chunks)
+            
+            # Check if we have enough silence (approx 1 second of silence)
+            # With 100ms chunks, 10 chunks = 1 second
+            if silence_chunks >= 10:
+                # Silence detected after speech, process the buffer
+                buffer_duration = len(updated_buffer) / (sample_rate * channels * 2)  # 16-bit audio
+                
+                # Only process if we have meaningful audio (at least 0.5 seconds)
+                if buffer_duration >= 0.5:
+                    # Process the audio
+                    transcript = process_audio(
+                        base64.b64encode(updated_buffer).decode('utf-8'),
+                        sample_rate,
+                        channels
+                    )
+                    
+                    # Clear the buffer and reset states
+                    manager.update_state(client_id, "audio_buffer", b"")
+                    manager.update_state(client_id, "audio_detected", False)
+                    manager.update_state(client_id, "silence_chunks", 0)
+                    
+                    # Update conversation history
+                    history = state.get("conversation_history", [])
+                    if transcript and len(transcript.strip()) > 0:
+                        history.append(transcript)
+                        manager.update_state(client_id, "conversation_history", history)
+                        
+                        return transcript
+                else:
+                    # Not enough audio, just reset
+                    manager.update_state(client_id, "audio_buffer", b"")
+                    manager.update_state(client_id, "audio_detected", False)
+                    manager.update_state(client_id, "silence_chunks", 0)
+        
+        # Also check for maximum buffer size (10 seconds) to prevent overflow
+        buffer_duration = len(updated_buffer) / (sample_rate * channels * 2)
+        if buffer_duration >= 10.0:
+            # Force process if buffer is too large
+            transcript = process_audio(
+                base64.b64encode(updated_buffer).decode('utf-8'),
+                sample_rate,
+                channels
+            )
+            
+            # Clear the buffer
+            manager.update_state(client_id, "audio_buffer", b"")
+            manager.update_state(client_id, "audio_detected", False)
+            manager.update_state(client_id, "silence_chunks", 0)
+            
+            # Update conversation history
+            history = state.get("conversation_history", [])
+            if transcript and len(transcript.strip()) > 0:
+                history.append(transcript)
+                manager.update_state(client_id, "conversation_history", history)
+                
+                return transcript
+    
+    except Exception as e:
+        logger.error(f"Error processing audio chunk: {e}")
+        return None
+    
+    return None
+
+
+def should_trigger_coaching(metrics: Dict[str, float], conversation_length: int) -> tuple[bool, str]:
+    """Determine if coaching should be triggered based on metrics."""
+    # Trigger 1: Low empathy score
+    if metrics["empathy"] < 5:
+        return True, "Low empathy detected"
+    
+    # Trigger 2: Negative sentiment
+    if metrics["sentiment"] < -0.2:
+        return True, "Negative sentiment detected"
+    
+    # Trigger 3: Rising escalation risk
+    if metrics["escalation"] > 30:
+        return True, "Escalation risk increasing"
+    
+    # Trigger 4: Stalled resolution progress
+    if metrics["resolution"] < 40 and conversation_length > 6:
+        return True, "Resolution progress stalled"
+    
+    return False, ""
+
+
+@router.websocket("/ws/{client_id}")
+async def websocket_endpoint(websocket: WebSocket, client_id: str):
+    """WebSocket endpoint for real-time audio streaming and coaching."""
+    await manager.connect(websocket, client_id)
+    
+    try:
+        # Send initial connection confirmation
+        await manager.send_message(
+            client_id,
+            WSResponseMessage(
+                type="connected",
+                data={"client_id": client_id, "status": "connected"},
+                timestamp=datetime.now().isoformat()
+            )
+        )
+        
+        while True:
+            # Receive message from client
+            data = await websocket.receive_json()
+            message = WSMessage(**data)
+            
+            # Update last activity
+            manager.update_state(client_id, "last_activity", datetime.now())
+            
+            # Handle different message types
+            if message.type == "audio":
+                # Process audio data
+                audio_msg = WSAudioMessage(**message.data)
+                transcript = await process_audio_chunk(
+                    client_id,
+                    audio_msg.audio_data,
+                    audio_msg.sample_rate,
+                    audio_msg.channels
+                )
+                
+                if transcript:
+                    # Send transcript to client
+                    await manager.send_message(
+                        client_id,
+                        WSResponseMessage(
+                            type="transcript",
+                            data={"transcript": transcript},
+                            timestamp=datetime.now().isoformat()
+                        )
+                    )
+                    
+                    # Get current state
+                    state = manager.get_state(client_id)
+                    history = state.get("conversation_history", [])
+                    
+                    # Analyze conversation
+                    try:
+                        metrics = analyze_conversation(transcript, history)
+                        manager.update_state(client_id, "metrics", metrics)
+                        
+                        # Send analysis to client
+                        await manager.send_message(
+                            client_id,
+                            WSResponseMessage(
+                                type="analysis",
+                                data=metrics,
+                                timestamp=datetime.now().isoformat()
+                            )
+                        )
+                        
+                        # Check if coaching should be triggered
+                        should_coach, reason = should_trigger_coaching(metrics, len(history))
+                        
+                        if should_coach:
+                            # Get recommendations
+                            recommendations = get_recommendations(transcript, history)
+                            
+                            # Send recommendations to client
+                            await manager.send_message(
+                                client_id,
+                                WSResponseMessage(
+                                    type="recommendation",
+                                    data={
+                                        "recommendations": recommendations,
+                                        "trigger_reason": reason
+                                    },
+                                    timestamp=datetime.now().isoformat()
+                                )
+                            )
+                    
+                    except Exception as e:
+                        logger.error(f"Error in analysis/coaching: {e}")
+                        await manager.send_message(
+                            client_id,
+                            WSResponseMessage(
+                                type="error",
+                                data={"error": f"Analysis error: {str(e)}"},
+                                timestamp=datetime.now().isoformat()
+                            )
+                        )
+            
+            elif message.type == "ping":
+                # Respond to ping with pong
+                await manager.send_message(
+                    client_id,
+                    WSResponseMessage(
+                        type="pong",
+                        data={},
+                        timestamp=datetime.now().isoformat()
+                    )
+                )
+            
+            elif message.type == "config":
+                # Handle configuration updates
+                if message.data:
+                    for key, value in message.data.items():
+                        manager.update_state(client_id, key, value)
+                    
+                    await manager.send_message(
+                        client_id,
+                        WSResponseMessage(
+                            type="config_updated",
+                            data=message.data,
+                            timestamp=datetime.now().isoformat()
+                        )
+                    )
+    
+    except WebSocketDisconnect:
+        manager.disconnect(client_id)
+        logger.info(f"Client {client_id} disconnected")
+    
+    except Exception as e:
+        logger.error(f"WebSocket error for client {client_id}: {e}")
+        await manager.send_message(
+            client_id,
+            WSResponseMessage(
+                type="error",
+                data={"error": str(e)},
+                timestamp=datetime.now().isoformat()
+            )
+        )
+        manager.disconnect(client_id) 

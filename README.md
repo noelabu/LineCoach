@@ -236,3 +236,48 @@ If you encounter issues with PyAudio dependencies during deployment:
 1. We've created a separate `requirements.cloud.txt` file that excludes PyAudio
 2. The `Dockerfile.cloud` uses this file to build a deployment-ready container
 3. The Cloud Run deployment doesn't need audio processing capabilities, so PyAudio is not required
+
+## Troubleshooting Authentication Issues
+
+If you encounter authentication errors with the Gemini API (such as `403 Request had insufficient authentication scopes` or `ACCESS_TOKEN_SCOPE_INSUFFICIENT`), follow these steps:
+
+### Local Development
+
+1. **Check your API key**:
+   - Ensure you have a valid Gemini API key in your `.env` file:
+     ```
+     GEMINI_API_KEY='your-gemini-api-key'
+     ```
+   - Verify the API key is active and has the necessary permissions in the Google AI Studio
+
+2. **Check service account credentials**:
+   - If using service account authentication, ensure the credentials file is valid and properly referenced:
+     ```
+     GOOGLE_APPLICATION_CREDENTIALS='path-to-service-account-credentials'
+     ```
+   - The service account should have the "Vertex AI User" role
+
+3. **Run the authentication check script**:
+   ```bash
+   python tests/check_gemini_auth.py
+   ```
+
+### Cloud Run Deployment
+
+1. **Check Secret Manager configuration**:
+   - Verify the `gemini-api-key` secret exists and contains a valid API key
+   - Ensure the service account has access to the secret
+
+2. **Update the secret and redeploy**:
+   - Use our helper script to fix Cloud Run authentication issues:
+     ```bash
+     ./scripts/fix_cloud_run_auth.sh
+     ```
+   - This script will guide you through checking and updating the API key in Secret Manager
+
+3. **Check Cloud Run logs**:
+   ```bash
+   gcloud logs read --project=your-project-id --resource=cloud_run_revision --service_name=linecoach --region=asia-southeast1
+   ```
+
+For more detailed information on authentication issues, see the [Troubleshooting section in the API test README](tests/test_linecoach_api_README.md#authentication-errors).
